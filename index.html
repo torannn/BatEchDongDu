@@ -53,6 +53,7 @@
       PLAYER_TWEEN_MS: 300,         // player step tween duration (ms)
       PLAYER_SLOWER_DELTA_MS: 200,
       CAPTURE_COOLDOWN_MS: 1500,
+      CAPTURE_READY_DELAY_MS: 140,
       SWING_HOLD_MS: 420,
       CATCH_HOLD_MS: 1200,
       FROG_LAND_PAUSE_MS: 500,
@@ -486,6 +487,7 @@
           scene.frogIndex = nextVal;
           scene.frogExp = (scene.frogExp + 1);
           scene.frogIsMoving = false;
+          if (scene.time) scene.frogReadyTime = scene.time.now + CONFIG.CAPTURE_READY_DELAY_MS;
 
           // Landing -> back to crouch
           setFrogState(scene, 'landing');
@@ -808,7 +810,8 @@
       if (!scene.captureEnabled) { sfxCooldown(scene); return; }
 
       const isOnSameNode = (scene.playerIndex === scene.frogIndex);
-      const canCaptureNow = !scene.frogIsMoving && isOnSameNode;
+      const readyTimeOk = !scene.time || (scene.time.now >= (scene.frogReadyTime || 0));
+      const canCaptureNow = !scene.frogIsMoving && isOnSameNode && readyTimeOk;
 
       // Face frog if attempting
       if (scene.frog && scene.player) {
