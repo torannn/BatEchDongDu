@@ -1,0 +1,1036 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <title>Modular Frog Jump</title>
+  <meta name="viewport" content="width=device-width, initial-scale=1" />
+  <style>
+    html, body {
+      margin: 0;
+      padding: 0;
+      background: radial-gradient(ellipse at center, #0f172a 0%, #0b1220 60%, #0a0f1a 100%);
+      height: 100%;
+      color: #e2e8f0;
+      font-family: 'Be Vietnam Pro', system-ui, -apple-system, Segoe UI, Roboto, Ubuntu, Cantarell, Noto Sans, Arial, "Apple Color Emoji", "Segoe UI Emoji";
+    }
+    #phaser-parent {
+      width: 100%;
+      height: 100%;
+      display: grid;
+      place-items: center;
+    }
+    .hint {
+      position: fixed;
+      bottom: 10px;
+      left: 50%;
+      transform: translateX(-50%);
+      font-size: 12px;
+      color: #aab4c4;
+      opacity: 0.85;
+      user-select: none;
+      pointer-events: none;
+      text-align: center;
+    }
+  </style>
+  <link rel="preconnect" href="https://fonts.googleapis.com">
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
+  <link href="https://fonts.googleapis.com/css2?family=Be+Vietnam+Pro:wght@400;600;800&display=swap" rel="stylesheet">
+  <script src="https://cdn.jsdelivr.net/npm/phaser@3.60.0/dist/phaser.min.js"></script>
+</head>
+<body>
+  <div id="phaser-parent"></div>
+
+  <script>
+    // ===========================
+    // Configuration & Constants
+    // ===========================
+    const CONFIG = {
+      N: 15,                 // modulus n (number of nodes)
+      A: 2,                 // multiplier a
+      RADIUS: 300,           // circle radius in pixels
+      FROG_JUMP_INTERVAL_MS: 1500, // initial frog jump period (ms)
+      FROG_TWEEN_MS: 850,           // frog jump tween duration (ms)
+      PLAYER_TWEEN_MS: 300,         // player step tween duration (ms)
+      PLAYER_SLOWER_DELTA_MS: 200,
+      CAPTURE_COOLDOWN_MS: 1500,
+      SWING_HOLD_MS: 420,
+      CATCH_HOLD_MS: 1200,
+      FROG_LAND_PAUSE_MS: 500,
+      FROG_SCALE: 0.07,
+      FROG_ORIGIN_X: 0.5,
+      FROG_ORIGIN_Y: 0.95,
+      FARMER_SCALE: 0.15,
+      FARMER_ORIGIN_X: 0.5,
+      FARMER_ORIGIN_Y: 0.95,
+      TRAIL_ALPHA: 0.28,             // alpha for frog trail lines
+      TRAIL_ENABLED: false
+    };
+
+    // ===========================
+    // Main Scene
+    // ===========================
+    function MainScene() {
+      Phaser.Scene.call(this, { key: 'MainScene' });
+    }
+    MainScene.prototype = Object.create(Phaser.Scene.prototype);
+    MainScene.prototype.constructor = MainScene;
+
+    MainScene.prototype.preload = function () {
+      // Generate Graphics-based textures; we'll still instantiate Sprites via this.add.sprite
+      makeGeneratedTextures(this);
+      // Real frog image assets (placed next to index.html)
+      this.load.image('frog_crouch', 'frog_crouch.png');
+      this.load.image('frog_jump', 'frog_jump.png');
+      this.load.image('frog_midair', 'frog_midair.png');
+      this.load.image('frog_landing', 'frog_landing.png');
+      this.load.image('stone2', 'stone2.png');
+      this.load.audio('bgmusic', 'bgmusic.mp3');
+      this.load.audio('bgmusic2', 'bg_music2.mp3');
+      this.load.audio('frog_jump_sfx', 'frog_jump.mp3');
+      this.load.audio('level_up', 'level_up.mp3');
+      this.load.audio('man_catch1', 'man_catch.mp3');
+      this.load.audio('man_catch2', 'man_catch2.mp3');
+      this.load.audio('man_catch3', 'man_catch3.mp3');
+      this.load.audio('man_miss1', 'man_miss.mp3');
+      this.load.audio('man_miss2', 'man_miss2.mp3');
+      this.load.audio('man_miss3', 'man_miss3.mp3');
+      this.load.audio('victory', 'victory.mp3');
+      // Farmer images (4 separate files)
+      this.load.image('farmer_crouch', 'man_jump_crouch.png');
+      this.load.image('farmer_jump', 'man_jump_jump.png');
+      this.load.image('farmer_midair', 'man_jump_midair.png');
+      this.load.image('farmer_landing', 'man_jump_landing.png');
+      // Farmer action images
+      this.load.image('farmer_swing', 'man_swing2.png');
+      this.load.image('farmer_swing3', 'man_swing3.png');
+      this.load.image('farmer_swing4', 'man_swing4.png');
+      this.load.image('farmer_miss', 'man_miss.png');
+      this.load.image('farmer_catch', 'man_catch.png');
+    };
+
+    MainScene.prototype.create = function () {
+      const centerX = this.cameras.main.centerX;
+      const centerY = this.cameras.main.centerY;
+
+      this.center = new Phaser.Math.Vector2(centerX, centerY);
+      this.N = CONFIG.N;
+      this.A = CONFIG.A;
+      this.frogTweenMs = CONFIG.FROG_TWEEN_MS;
+      this.playerSlowerDelta = CONFIG.PLAYER_SLOWER_DELTA_MS;
+      this.playerTweenMs = this.frogTweenMs + this.playerSlowerDelta;
+      this.captureCooldownMs = Math.max(CONFIG.CAPTURE_COOLDOWN_MS, this.playerTweenMs); // cooldown equals player's jump time
+      this.captureEnabled = true;
+      this.frogExp = 0;
+      this.earliestNextFrogMoveTime = 0;
+      this.didWin = false;
+      this.bgTracks = [
+        this.sound.add('bgmusic', { loop: true, volume: 0.4 }),
+        this.sound.add('bgmusic2', { loop: true, volume: 0.4 })
+      ];
+      this.currentBgIndex = Phaser.Math.Between(0, this.bgTracks.length - 1);
+      this.bgIsPlaying = false;
+
+      // Modern ring background
+      this.ringGfx = this.add.graphics({ x: 0, y: 0 });
+      this.ringGfx.setDepth(0);
+      this.ringGfx.lineStyle(6, 0x334155, 1);
+      this.ringGfx.strokeCircle(centerX, centerY, CONFIG.RADIUS + 10);
+      this.ringGfx.lineStyle(4, 0x67e8f9, 0.7);
+      this.ringGfx.strokeCircle(centerX, centerY, CONFIG.RADIUS);
+      this.ringGfx.lineStyle(2, 0x0ea5e9, 0.5);
+      this.ringGfx.strokeCircle(centerX, centerY, CONFIG.RADIUS - 10);
+
+      // Trail graphics to visualize the frog's modular path
+      this.trailGfx = this.add.graphics({ x: 0, y: 0 });
+      this.trailGfx.setDepth(0);
+      this.trailGfx.lineStyle(2, 0x22d3ee, CONFIG.TRAIL_ALPHA);
+      this.trailEnabled = CONFIG.TRAIL_ENABLED;
+
+      // Create nodes positioned on a circle, with labels 0..n-1
+      this.nodes = createNodes(this, this.center, CONFIG.RADIUS, this.N);
+
+      // Title
+      this.titleContainer = this.add.container(centerX, 34).setDepth(20);
+      const tBold = this.add.text(100, 200, 'Bắt ếch đồng ', { fontSize: '32px', color: '#a7ffad', fontStyle: 'bold', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif' }).setOrigin(1, 0.5).setStroke('#0b1220', 6).setShadow(0, 3, '#000000', 6, true, true);
+      const tNormal = this.add.text(100, 200, 'dư', { fontSize: '32px', color: '#f8fafc', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif' }).setOrigin(0, 0.5).setStroke('#0b1220', 6).setShadow(0, 3, '#000000', 6, true, true);
+      this.titleContainer.add([tBold, tNormal]);
+
+      this.score = 0;
+      this.scoreText = this.add.text(centerX, 300, 'Điểm: 0', { fontSize: '24px', color: '#f8fafc', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif', fontStyle: 'bold' })
+        .setOrigin(0.5).setDepth(20).setStroke('#0b1220', 6).setShadow(0, 3, '#000000', 6, true, true);
+
+      // Init audio/SFX helpers
+      initSfx(this);
+
+      // Compute a reference pixel height from jump (fallback to crouch) to normalize scale across states
+      const jumpTex = this.textures.get('farmer_jump');
+      const crouchTex = this.textures.get('farmer_crouch');
+      const baseImg = (jumpTex && jumpTex.getSourceImage()) ? jumpTex.getSourceImage() : crouchTex.getSourceImage();
+      this.farmerBaseH = baseImg.height;
+      this.farmerBaseW = baseImg.width;
+
+      // Player starts at index 0
+      this.playerIndex = 0;
+      const pPos = this.nodes[this.playerIndex].pos;
+      this.player = this.add.sprite(pPos.x, pPos.y, 'farmer_crouch')
+        .setDepth(10)
+        .setScale(farmerScaleFor(this, 'farmer_crouch'))
+        .setOrigin(CONFIG.FARMER_ORIGIN_X, CONFIG.FARMER_ORIGIN_Y)
+        .setName('player');
+
+      // Frog starts at index 1 (a^0 mod n = 1)
+      this.frogVal = 1; // current remainder value
+      this.frogIndex = this.frogVal;
+      const fPos = this.nodes[this.frogIndex].pos;
+      this.frog = this.add.sprite(fPos.x, fPos.y, 'frog_crouch')
+        .setDepth(9)
+        .setScale(CONFIG.FROG_SCALE)
+        .setOrigin(CONFIG.FROG_ORIGIN_X, CONFIG.FROG_ORIGIN_Y)
+        .setName('frog');
+      applyNewFrogTint(this);
+      this.anims.create({
+        key: 'farmerSwingAnim',
+        frames: [
+          { key: 'farmer_swing' },
+          { key: 'farmer_swing3' },
+          { key: 'farmer_swing4' }
+        ],
+        frameRate: Math.max(1, Math.round(1000 / (CONFIG.SWING_HOLD_MS / 3))),
+        repeat: 0
+      });
+      this.player.on('animationupdate-farmerSwingAnim', (anim, frame) => {
+        const k = (frame && (frame.textureKey || (frame.frame && frame.frame.texture && frame.frame.texture.key))) || (this.player && this.player.texture && this.player.texture.key) || 'farmer_swing';
+        const s = swingScaleFor(this, k);
+        if (s) this.player.setScale(s);
+      });
+      this.player.on('animationstart-farmerSwingAnim', (anim, frame) => {
+        const k = (frame && (frame.textureKey || (frame.frame && frame.frame.texture && frame.frame.texture.key))) || 'farmer_swing';
+        const s = swingScaleFor(this, k);
+        if (s) this.player.setScale(s);
+      });
+      this.player.on('animationcomplete-farmerSwingAnim', () => {
+        const k = (this.player && this.player.texture && this.player.texture.key) ? this.player.texture.key : 'farmer_swing4';
+        const s = swingScaleFor(this, k);
+        if (s) this.player.setScale(s);
+      });
+
+      // Flags and timers
+      this.frogIsMoving = false;
+      this.playerIsMoving = false;
+      this.lastCatchTime = 0;
+
+      // Keyboard input
+      this.cursors = this.input.keyboard.createCursorKeys();
+      handleInput(this);
+
+      // Auto-jump timer for frog
+      this.frogDelay = CONFIG.FROG_JUMP_INTERVAL_MS;
+      this.frogTimer = this.time.addEvent({
+        delay: this.frogDelay,
+        loop: true,
+        callback: () => moveFrog(this)
+      });
+    };
+
+    MainScene.prototype.update = function () {
+      // Logic is event/tween driven
+    };
+
+    // ===========================
+    // Step 1: Node Creation + Math Helpers
+    // ===========================
+
+    // Arrange n nodes evenly on a circle of radius r around center.
+    // Index 0 at 12 o'clock, then clockwise increasing indices.
+    function createNodes(scene, center, r, n) {
+      const nodes = [];
+      const labelStyle = { fontSize: '26px', color: '#e5e7eb', fontStyle: 'bold', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif' };
+
+      for (let i = 0; i < n; i++) {
+        // Angle: start at top (-PI/2) and move clockwise by subtracting angle step
+        const angle = -Math.PI / 2 + i * (2 * Math.PI / n);
+        const x = center.x + r * Math.cos(angle);
+        const y = center.y + r * Math.sin(angle);
+
+        // Label slightly outside the circle
+        const labelOffset = 50;
+        const lx = center.x + (r + labelOffset) * Math.cos(angle);
+        const ly = center.y + (r + labelOffset) * Math.sin(angle);
+
+        const stoneImg = scene.textures.get('stone2').getSourceImage();
+        const targetW = 100;
+        const stoneScale = targetW / stoneImg.width;
+        const nodeSprite = scene.add.sprite(x, y, 'stone2')
+          .setDepth(1)
+          .setScale(stoneScale)
+          .setName('node_' + i);
+
+        const label = scene.add.text(lx, ly, String(i), labelStyle)
+          .setOrigin(0.5)
+          .setDepth(2);
+        label.setStroke('#0b1220', 3).setShadow(0, 2, '#000000', 4, true, true);
+
+        nodes.push({ index: i, pos: new Phaser.Math.Vector2(x, y), sprite: nodeSprite, label, stoneScale });
+      }
+      return nodes;
+    }
+
+    // Euclidean algorithm for GCD, used to show coprimality info
+    function gcd(a, b) {
+      a = Math.abs(a); b = Math.abs(b);
+      while (b) {
+        const t = b;
+        b = a % b;
+        a = t;
+      }
+      return a;
+    }
+
+    function powModIter(a, exp, n) {
+      if (n <= 0) return 0;
+      a = ((a % n) + n) % n;
+      let result = 1 % n;
+      let base = a;
+      let e = Math.max(0, Math.floor(exp));
+      while (e > 0) {
+        if (e & 1) result = (result * base) % n;
+        base = (base * base) % n;
+        e >>= 1;
+      }
+      return result;
+    }
+
+    function nextCoprimeBase(scene) {
+      const n = scene.N || CONFIG.N;
+      let a = scene.A || 1;
+      if (n <= 2) return 1;
+      for (let i = 0; i < n; i++) {
+        a = a + 1;
+        if (a >= n) a = 2;
+        if (a <= 1) a = 2;
+        if (gcd(a, n) === 1) return a;
+      }
+      return 2;
+    }
+
+    // ===========================
+    // Step 2: Frog Logic & Animation
+    // ===========================
+
+    // Move frog via iterative modular multiplication: next = (current * a) % n
+    // This corresponds to a^(m+1) mod n without using Math.pow to avoid overflow.
+    function moveFrog(scene) {
+      if (scene.frogIsMoving) return;
+      if (scene.time && scene.earliestNextFrogMoveTime && scene.time.now < scene.earliestNextFrogMoveTime) return;
+
+      const previousVal = scene.frogVal;
+      const nextVal = (previousVal * scene.A) % scene.N;
+
+      const from = scene.nodes[previousVal].pos;
+      const to = scene.nodes[nextVal].pos;
+
+      scene.frogIsMoving = true;
+
+      const arcHeight = Math.max(24, CONFIG.RADIUS * 0.16);
+      // Animate frog state across the jump
+      scene.frog.setFlipX(to.x < from.x);
+      setFrogState(scene, 'jump');
+      const midairDelay = Math.min(200, Math.floor(scene.frogTweenMs * 0.2));
+      scene.time.delayedCall(Math.max(60, midairDelay), () => {
+        if (scene.frogIsMoving) setFrogState(scene, 'midair');
+      });
+      sfxFrogJump(scene);
+      tweenAlongArc(scene, scene.frog, scene.center, from, to, scene.frogTweenMs, arcHeight, 'Sine.easeInOut')
+        .then(() => {
+          // Draw faint trail connecting previous node to current node
+          if (scene.trailEnabled) {
+            scene.trailGfx.beginPath();
+            scene.trailGfx.moveTo(from.x, from.y);
+            scene.trailGfx.lineTo(to.x, to.y);
+            scene.trailGfx.strokePath();
+          }
+
+          scene.frogVal = nextVal;
+          scene.frogIndex = nextVal;
+          scene.frogExp = (scene.frogExp + 1);
+          scene.frogIsMoving = false;
+
+          // Landing -> back to crouch
+          setFrogState(scene, 'landing');
+          sfxFrogLand(scene);
+          scene.time.delayedCall(160, () => setFrogState(scene, 'crouch'));
+          if (scene.time) scene.earliestNextFrogMoveTime = scene.time.now + CONFIG.FROG_LAND_PAUSE_MS;
+          if (scene.time) scene.time.delayedCall(CONFIG.FROG_LAND_PAUSE_MS, () => {
+            if (!scene.frogIsMoving) moveFrog(scene);
+          });
+
+          // Collision check after frog lands
+          checkCatch(scene, 'frog');
+        });
+    }
+
+    // Tween sprite along a quadratic Bezier arc between two points
+    function tweenAlongArc(scene, sprite, center, from, to, duration, height, ease) {
+      return new Promise((resolve) => {
+        const mid = new Phaser.Math.Vector2((from.x + to.x) / 2, (from.y + to.y) / 2);
+        const dir = new Phaser.Math.Vector2(to.x - from.x, to.y - from.y);
+        const normal = new Phaser.Math.Vector2(-dir.y, dir.x);
+        if (normal.length() > 0.0001) normal.normalize();
+        const control = mid.clone().add(normal.scale(height));
+
+        const curve = new Phaser.Curves.QuadraticBezier(from, control, to);
+        const data = { t: 0 };
+        let last = new Phaser.Math.Vector2(from.x, from.y);
+
+        scene.tweens.add({
+          targets: data,
+          t: 1,
+          duration: duration,
+          ease: ease || 'Sine.easeInOut',
+          onUpdate: () => {
+            const p = curve.getPoint(data.t);
+            sprite.setPosition(p.x, p.y);
+            if (sprite.name === 'frog' || sprite.name === 'player') {
+              const dx = p.x - last.x;
+              const dy = p.y - last.y;
+              const len = Math.max(1e-6, Math.hypot(dx, dy));
+              const tiltMax = Phaser.Math.DegToRad(20);
+              const tilt = Phaser.Math.Clamp(dy / len, -1, 1) * tiltMax;
+              sprite.setRotation(tilt);
+            }
+            last.set(p.x, p.y);
+          },
+          onComplete: () => resolve()
+        });
+      });
+    }
+
+    // Frog visual state helper
+    function setFrogState(scene, state) {
+      scene.frogState = state;
+      let key = 'frog_crouch';
+      if (state === 'jump') key = 'frog_jump';
+      else if (state === 'midair') key = 'frog_midair';
+      else if (state === 'landing') key = 'frog_landing';
+      if (scene.frog && scene.textures.exists(key)) {
+        scene.frog.setTexture(key);
+        if (state === 'crouch') scene.frog.setRotation(0);
+      }
+    }
+
+    function setFarmerState(scene, state) {
+      if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil && state !== 'miss' && state !== 'crouch') {
+        return;
+      }
+      scene.farmerState = state;
+      let key = 'farmer_crouch';
+      if (state === 'jump') key = 'farmer_jump';
+      else if (state === 'midair') key = 'farmer_midair';
+      else if (state === 'landing') key = 'farmer_landing';
+      else if (state === 'swing') key = 'farmer_swing';
+      else if (state === 'miss') key = 'farmer_miss';
+      else if (state === 'catch') key = 'farmer_catch';
+      if (state === 'swing' && scene.player && scene.anims && scene.anims.exists('farmerSwingAnim')) {
+        scene.player.setTexture('farmer_swing');
+        const s = swingScaleFor(scene, 'farmer_swing');
+        if (s) scene.player.setScale(s);
+        scene.player.anims.play('farmerSwingAnim', true);
+        if (scene.swingRotTween) { try { scene.swingRotTween.remove(); } catch(e){}; scene.swingRotTween = null; }
+        const dir = scene.player.flipX ? -1 : 1;
+        scene.swingRotTween = scene.tweens.add({
+          targets: scene.player,
+          rotation: { from: 0, to: dir * Phaser.Math.DegToRad(10) },
+          duration: Math.floor(CONFIG.SWING_HOLD_MS * 0.5),
+          yoyo: true,
+          ease: 'Sine.easeInOut',
+          onComplete: () => { scene.swingRotTween = null; scene.player.setRotation(0); }
+        });
+        return;
+      }
+      if (scene.player && scene.textures.exists(key)) {
+        scene.player.setTexture(key);
+        const s = farmerScaleFor(scene, key);
+        if (s) scene.player.setScale(s);
+        if (state === 'crouch') scene.player.setRotation(0);
+        if (scene.time) scene.time.delayedCall(0, () => applyPlayerScaleForCurrentTexture(scene));
+      }
+    }
+
+    function farmerScaleFor(scene, key) {
+      try {
+        const baseImg = scene.textures.get('farmer_crouch').getSourceImage();
+        const baseH = scene.farmerBaseH || baseImg.height;
+        const baseW = scene.farmerBaseW || baseImg.width;
+        const img = scene.textures.get(key).getSourceImage();
+        const h = (img && img.height) ? img.height : baseH;
+        const w = (img && img.width) ? img.width : baseW;
+        // Normalize by area to keep visual mass consistent
+        const areaRatio = (baseW * baseH) / Math.max(1, w * h);
+        const scale = CONFIG.FARMER_SCALE * Math.sqrt(areaRatio);
+        return scale;
+      } catch (e) {
+        return CONFIG.FARMER_SCALE;
+      }
+    }
+
+    function swingScaleFor(scene, key) {
+      try {
+        const baseImg = scene.textures.get('farmer_crouch').getSourceImage();
+        const baseH = scene.farmerBaseH || baseImg.height;
+        const img = scene.textures.get(key).getSourceImage();
+        const h = (img && img.height) ? img.height : baseH;
+        const scale = CONFIG.FARMER_SCALE * (baseH / Math.max(1, h));
+        return scale;
+      } catch (e) {
+        return CONFIG.FARMER_SCALE;
+      }
+    }
+
+    function scaleForTextureKey(scene, key) {
+      if (!key) return CONFIG.FARMER_SCALE;
+      if (key === 'farmer_swing' || key === 'farmer_swing3' || key === 'farmer_swing4') {
+        return swingScaleFor(scene, key);
+      }
+      return farmerScaleFor(scene, key);
+    }
+
+    function applyPlayerScaleForCurrentTexture(scene) {
+      if (!scene || !scene.player) return;
+      let key = null;
+      const anims = scene.player.anims;
+      if (anims && anims.isPlaying && anims.currentFrame) {
+        const cf = anims.currentFrame;
+        key = (cf.frame && cf.frame.texture && cf.frame.texture.key) || cf.textureKey || cf.key || null;
+      }
+      if (!key && scene.player.texture) key = scene.player.texture.key;
+      if (!key) return;
+      const s = scaleForTextureKey(scene, key);
+      if (s) scene.player.setScale(s);
+    }
+
+    // ===========================
+    // Step 3: Player Controls
+    // ===========================
+
+    function handleInput(scene) {
+      scene.input.keyboard.on('keydown-LEFT', () => {
+        ensureAudioUnlocked(scene);
+        if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
+        if (scene.playerIsMoving) return;
+        const next = (scene.playerIndex - 1 + scene.N) % scene.N; // counterclockwise
+        movePlayerTo(scene, next);
+      });
+
+      scene.input.keyboard.on('keydown-RIGHT', () => {
+        ensureAudioUnlocked(scene);
+        if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
+        if (scene.playerIsMoving) return;
+        const next = (scene.playerIndex + 1) % scene.N; // clockwise
+        movePlayerTo(scene, next);
+      });
+
+      scene.input.keyboard.on('keydown-SPACE', () => {
+        ensureAudioUnlocked(scene);
+        attemptCapture(scene);
+      });
+
+      setupMobileControls(scene);
+    }
+
+    function setupMobileControls(scene) {
+      const cam = scene.cameras.main;
+      const w = cam.width; const h = cam.height; const cx = cam.centerX; const cy = h - 70;
+      const uiDepth = 30;
+      const makeBtn = (x, y, w, h, label, fill, stroke, onTap) => {
+        const r = scene.add.rectangle(x, y, w, h, fill, 0.85)
+          .setStrokeStyle(2, stroke, 0.9)
+          .setDepth(uiDepth)
+          .setScrollFactor(0)
+          .setInteractive({ useHandCursor: true });
+        const t = scene.add.text(x, y, label, { fontSize: '20px', color: '#e5e7eb' }).setOrigin(0.5).setDepth(uiDepth + 1).setScrollFactor(0);
+        r.on('pointerdown', (pointer, localX, localY, event) => { if (event) event.stopPropagation(); ensureAudioUnlocked(scene); onTap(); });
+        return { r, t };
+      };
+      const left = makeBtn(cx - 150, cy - 300, 110, 52, '◀', 0x1f2937, 0x60a5fa, () => {
+        if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
+        if (scene.playerIsMoving) return;
+        const next = (scene.playerIndex - 1 + scene.N) % scene.N;
+        movePlayerTo(scene, next);
+      });
+      const catchBtn = makeBtn(cx, cy -300, 140, 56, 'Bắt', 0x0ea5e9, 0x67e8f9, () => attemptCapture(scene));
+      const right = makeBtn(cx + 150, cy - 300, 110, 52, '▶', 0x1f2937, 0x60a5fa, () => {
+        if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
+        if (scene.playerIsMoving) return;
+        const next = (scene.playerIndex + 1) % scene.N;
+        movePlayerTo(scene, next);
+      });
+
+      scene.uiButtons = { left, catchBtn, right };
+
+      scene.input.on('pointerdown', (pointer) => {
+        const px = pointer.x, py = pointer.y;
+        if (py > h - 120) return;
+        if (scene.uiButtons) {
+          const over = (btn) => btn && btn.r && btn.r.getBounds && btn.r.getBounds().contains(px, py);
+          if (over(scene.uiButtons.left) || over(scene.uiButtons.catchBtn) || over(scene.uiButtons.right)) return;
+        }
+        if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
+        if (scene.playerIsMoving) return;
+        if (px < w * 0.3) {
+          const next = (scene.playerIndex - 1 + scene.N) % scene.N;
+          movePlayerTo(scene, next);
+        } else if (px > w * 0.7) {
+          const next = (scene.playerIndex + 1) % scene.N;
+          movePlayerTo(scene, next);
+        }
+      });
+    }
+
+    function movePlayerTo(scene, targetIndex) {
+      if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) return;
+      const from = scene.nodes[scene.playerIndex].pos;
+      const to = scene.nodes[targetIndex].pos;
+      scene.playerIsMoving = true;
+      scene.player.setFlipX(to.x < from.x);
+      applyPlayerScaleForCurrentTexture(scene);
+      if (scene.time) scene.time.delayedCall(0, () => applyPlayerScaleForCurrentTexture(scene));
+      setFarmerState(scene, 'jump');
+      const midairDelay = Math.min(200, Math.floor(scene.playerTweenMs * 0.2));
+      scene.time.delayedCall(Math.max(60, midairDelay), () => {
+        if (scene.playerIsMoving) setFarmerState(scene, 'midair');
+      });
+      const arcHeight = Math.max(12, CONFIG.RADIUS * 0.08);
+      sfxJumpPlayer(scene);
+      tweenAlongArc(scene, scene.player, scene.center, from, to, scene.playerTweenMs, arcHeight, 'Quad.easeInOut')
+        .then(() => {
+          scene.playerIndex = targetIndex;
+          scene.playerIsMoving = false;
+          setFarmerState(scene, 'landing');
+          sfxLandPlayer(scene);
+          scene.time.delayedCall(140, () => setFarmerState(scene, 'crouch'));
+          // Collision check after player lands
+          checkCatch(scene, 'player');
+        });
+    }
+
+    // ===========================
+    // Step 4: Gameplay Mechanics
+    // ===========================
+
+    function checkCatch(scene, cause) {
+      // Reserved for future auto-catch logic if needed
+    }
+
+    function attemptCapture(scene) {
+      if (scene.playerIsMoving) return; // don't interrupt a move
+      // If on cooldown, do nothing (respect cooldown) but give subtle audio
+      if (!scene.captureEnabled) { sfxCooldown(scene); return; }
+
+      const isOnSameNode = (scene.playerIndex === scene.frogIndex);
+      const canCaptureNow = !scene.frogIsMoving && isOnSameNode;
+
+      // Face frog if attempting
+      if (scene.frog && scene.player) {
+        scene.player.setFlipX(scene.frog.x < scene.player.x);
+        applyPlayerScaleForCurrentTexture(scene);
+        if (scene.time) scene.time.delayedCall(0, () => applyPlayerScaleForCurrentTexture(scene));
+      }
+
+      if (!canCaptureNow) {
+        // Don't swing; just a quick miss pose + audio
+        scene.captureEnabled = false;
+        setFarmerState(scene, 'swing');
+        sfxSwing(scene);
+        scene.time.delayedCall(CONFIG.SWING_HOLD_MS, () => {
+          setFarmerState(scene, 'miss');
+          sfxMiss(scene);
+          showActionText(scene, 'Trượt!', '#f43f5e', scene.captureCooldownMs);
+          scene.missPoseUntil = scene.time.now + scene.captureCooldownMs;
+          scene.time.delayedCall(scene.captureCooldownMs, () => {
+            scene.captureEnabled = true;
+            scene.missPoseUntil = 0;
+            setFarmerState(scene, 'crouch');
+          });
+        });
+        return;
+      }
+
+      // Valid attempt: short swing into catch
+      setFarmerState(scene, 'swing');
+      sfxSwing(scene);
+      scene.captureEnabled = false;
+      scene.time.delayedCall(CONFIG.SWING_HOLD_MS, () => {
+        // Success path
+        const now = scene.time.now;
+        scene.lastCatchTime = now;
+        scene.score += 1;
+        scene.scoreText.setText(`Điểm: ${scene.score}`);
+        setFarmerState(scene, 'catch');
+        sfxCatch(scene);
+        if (scene.score === 5) { playLevelUp(scene); }
+        else if (scene.score % 5 !== 0) { sfxScoreUp(scene); }
+        if (scene.score >= 10 && !scene.didWin) { scene.didWin = true; playVictory(scene); }
+        spawnCaughtFrogOverlay(scene);
+        showActionText(scene, 'Bắt được!', '#34d399', Math.max(600, scene.captureCooldownMs));
+
+        const node = scene.nodes[scene.frogIndex].sprite;
+        flashTint(scene, [node, scene.frog, scene.player], 0xfff38a, 140);
+        if (scene.score > 0 && scene.score % 5 === 0) {
+          adjustFrogSpeed(scene, Math.max(500, Math.floor(scene.frogDelay * 0.8)));
+        }
+        beginRespawnFlow(scene);
+
+        scene.time.delayedCall(CONFIG.CATCH_HOLD_MS, () => setFarmerState(scene, 'crouch'));
+        scene.time.delayedCall(CONFIG.CATCH_HOLD_MS + 800, () => { if (scene.farmerState !== 'crouch' && !scene.playerIsMoving) setFarmerState(scene, 'crouch'); });
+      });
+    }
+
+    function adjustFrogSpeed(scene, newDelay) {
+      scene.frogDelay = newDelay;
+      if (scene.frogTimer) scene.frogTimer.remove(false);
+      scene.frogTimer = scene.time.addEvent({ delay: scene.frogDelay, loop: true, callback: () => moveFrog(scene) });
+
+      sfxSpeedUp(scene);
+      const msg = scene.add.text(scene.cameras.main.centerX, 120, 'Frog speed increased!', { fontSize: '16px', color: '#38bdf8' })
+        .setOrigin(0.5).setDepth(20).setAlpha(0);
+
+      scene.tweens.add({ targets: msg, alpha: 1, duration: 180, yoyo: true, hold: 450, repeat: 1, onComplete: () => msg.destroy() });
+    }
+
+    function beginRespawnFlow(scene) {
+      if (scene.frogTimer) scene.frogTimer.remove(false);
+      scene.tweens.add({ targets: scene.frog, alpha: 0, duration: 180 });
+      scene.time.delayedCall(scene.captureCooldownMs, () => {
+        scene.A = nextCoprimeBase(scene);
+        if (scene.paramText) scene.paramText.setText(`Parameters: a = ${scene.A}, n = ${scene.N}   (gcd(a, n) = ${gcd(scene.A, scene.N)})`);
+        const newExp = 0; // always spawn at a^0
+        scene.frogExp = newExp;
+        const newVal = powModIter(scene.A, newExp, scene.N);
+        scene.frogVal = newVal;
+        scene.frogIndex = newVal;
+        const pos = scene.nodes[newVal].pos;
+        scene.frog.setPosition(pos.x, pos.y);
+        scene.frog.setAlpha(1);
+        scene.frogIsMoving = false;
+        scene.frog.setOrigin(CONFIG.FROG_ORIGIN_X, CONFIG.FROG_ORIGIN_Y).setScale(CONFIG.FROG_SCALE).setRotation(0);
+        setFrogState(scene, 'crouch');
+        applyNewFrogTint(scene);
+
+        sfxRespawn(scene);
+        scene.frogTimer = scene.time.addEvent({ delay: scene.frogDelay, loop: true, callback: () => moveFrog(scene) });
+        moveFrog(scene);
+        scene.captureEnabled = true;
+        setFarmerState(scene, 'crouch');
+      });
+    }
+
+    function flashTint(scene, sprites, color, duration) {
+      sprites.forEach(s => s.setTint(color));
+      scene.time.delayedCall(duration, () => sprites.forEach(s => {
+        if (s.name === 'frog') s.setTint(scene.frogBaseTint || 0xffffff);
+        else s.clearTint();
+      }));
+      const onlyActors = sprites.filter(s => s.name === 'frog' || s.name === 'player');
+      const d = Math.max(120, Math.floor(duration * 0.8));
+      onlyActors.forEach(s => {
+        const baseX = s.scaleX;
+        const baseY = s.scaleY;
+        scene.tweens.add({
+          targets: s,
+          scaleX: { from: baseX, to: baseX * 1.22 },
+          scaleY: { from: baseY, to: baseY * 1.22 },
+          yoyo: true,
+          duration: d,
+          ease: 'Quad.easeOut'
+        });
+      });
+    }
+
+    function randomFrogTint() {
+      const palette = [0x84cc16, 0x22c55e, 0x10b981, 0x06b6d4, 0xf97316, 0xa78bfa, 0xf43f5e, 0xf59e0b, 0x34d399];
+      return palette[Phaser.Math.Between(0, palette.length - 1)];
+    }
+
+    function applyNewFrogTint(scene) {
+      scene.frogBaseTint = randomFrogTint();
+      scene.frog.setTint(scene.frogBaseTint);
+    }
+
+    function spawnCaughtFrogOverlay(scene) {
+      if (!scene.frog || !scene.player) return;
+      const key = 'frog_crouch';
+      const dir = scene.player.flipX ? -1 : 1;
+      const px = scene.player.x, py = scene.player.y;
+      const ox = px + dir * (scene.player.displayWidth * 0.32);
+      const oy = py - (scene.player.displayHeight * 0.18);
+      const s = scene.add.sprite(ox, oy, key)
+        .setDepth(11)
+        .setScale(CONFIG.FROG_SCALE * 0.5)
+        .setOrigin(CONFIG.FROG_ORIGIN_X, CONFIG.FROG_ORIGIN_Y)
+        .setTint(scene.frogBaseTint || 0xffffff)
+        .setAlpha(0)
+        .setRotation((scene.player.flipX ? 1 : -1) * Phaser.Math.DegToRad(18));
+      const holdMs = Math.max(CONFIG.CATCH_HOLD_MS, scene.captureCooldownMs);
+      scene.tweens.add({ targets: s, alpha: 1, duration: 120, yoyo: true, hold: holdMs, onComplete: () => s.destroy(), ease: 'Quad.easeOut' });
+    }
+
+    function showActionText(scene, text, color, holdMs = 600) {
+      if (!scene || !scene.player) return;
+      const px = scene.player.x;
+      const py = scene.player.y - (scene.player.displayHeight || 60) * 0.95;
+      const t = scene.add.text(px, py, text, { fontSize: '26px', color, fontStyle: 'bold', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif' })
+        .setOrigin(0.5)
+        .setDepth(21)
+        .setAlpha(0)
+        .setStroke('#0b1220', 6)
+        .setShadow(0, 3, '#000000', 6, true, true)
+        .setBackgroundColor('rgba(11,18,32,0.6)')
+        .setPadding(10, 6, 10, 6);
+      scene.tweens.add({ targets: t, alpha: 1, y: py - 12, duration: 140, yoyo: true, hold: holdMs, ease: 'Quad.easeOut', onComplete: () => t.destroy() });
+    }
+
+    // ===========================
+    // Simple SFX (WebAudio tones)
+    // ===========================
+    function initSfx(scene) {
+      try {
+        scene.audioCtx = (scene.sound && scene.sound.context) ? scene.sound.context : (window.AudioContext ? new AudioContext() : null);
+        if (!scene.audioCtx) return;
+        scene.masterGain = scene.audioCtx.createGain();
+        scene.masterGain.gain.value = 0.08;
+        scene.masterGain.connect(scene.audioCtx.destination);
+      } catch (e) { /* noop */ }
+    }
+
+    function ensureAudioUnlocked(scene) {
+      if (scene.sound && scene.sound.locked) scene.sound.unlock();
+      if (scene.audioCtx && scene.audioCtx.state === 'suspended') scene.audioCtx.resume();
+      if (scene.bgTracks && !scene.bgIsPlaying) startBgMusic(scene);
+    }
+
+    function tone(scene, freq, durMs, type = 'sine', gain = 0.1, delayMs = 0) {
+      if (!scene.audioCtx || !scene.masterGain) return;
+      const ctx = scene.audioCtx;
+      const now = ctx.currentTime + (delayMs / 1000);
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = type; osc.frequency.setValueAtTime(freq, now);
+      g.gain.setValueAtTime(gain, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + durMs / 1000);
+      osc.connect(g); g.connect(scene.masterGain);
+      osc.start(now);
+      osc.stop(now + durMs / 1000 + 0.05);
+    }
+
+    function sweepTone(scene, freqStart, freqEnd, durMs, type = 'sine', gain = 0.1, delayMs = 0) {
+      if (!scene.audioCtx || !scene.masterGain) return;
+      const ctx = scene.audioCtx;
+      const now = ctx.currentTime + (delayMs / 1000);
+      const osc = ctx.createOscillator();
+      const g = ctx.createGain();
+      osc.type = type;
+      osc.frequency.setValueAtTime(freqStart, now);
+      osc.frequency.exponentialRampToValueAtTime(Math.max(20, freqEnd), now + durMs / 1000);
+      g.gain.setValueAtTime(gain, now);
+      g.gain.exponentialRampToValueAtTime(0.001, now + durMs / 1000);
+      osc.connect(g); g.connect(scene.masterGain);
+      osc.start(now);
+      osc.stop(now + durMs / 1000 + 0.05);
+    }
+
+    function sfxSwing(scene) { sweepTone(scene, 320, 480, 100, 'triangle', 0.12); }
+    function sfxCatch(scene) {
+      const keys = ['man_catch1','man_catch2','man_catch3'];
+      const k = keys[Phaser.Math.Between(0, keys.length - 1)];
+      if (scene.sound) scene.sound.play(k, { volume: 0.9 });
+    }
+    function sfxMiss(scene) {
+      const keys = ['man_miss1','man_miss2','man_miss3'];
+      const k = keys[Phaser.Math.Between(0, keys.length - 1)];
+      if (scene.sound) scene.sound.play(k, { volume: 0.9 });
+    }
+    function sfxCooldown(scene) { tone(scene, 160, 80, 'sine', 0.06); tone(scene, 140, 60, 'sine', 0.05, 40); }
+    function sfxJumpPlayer(scene) { sweepTone(scene, 380, 520, 90, 'triangle', 0.08); }
+    function sfxLandPlayer(scene) { tone(scene, 220, 50, 'sine', 0.07); tone(scene, 180, 40, 'sine', 0.05, 30); }
+    function sfxFrogJump(scene) { if (scene.sound) scene.sound.play('frog_jump_sfx', { volume: 0.8 }); }
+    function sfxFrogLand(scene) { tone(scene, 280, 50, 'sine', 0.06); tone(scene, 240, 40, 'sine', 0.04, 30); }
+    function sfxScoreUp(scene) {
+      tone(scene, 587, 60, 'triangle', 0.09);
+      tone(scene, 784, 60, 'triangle', 0.09, 50);
+      tone(scene, 880, 80, 'triangle', 0.10, 100);
+    }
+    function sfxRespawn(scene) {
+      sweepTone(scene, 300, 600, 200, 'sine', 0.07);
+      tone(scene, 440, 100, 'triangle', 0.06, 150);
+    }
+    function sfxSpeedUp(scene) {
+      tone(scene, 440, 60, 'square', 0.08);
+      tone(scene, 554, 60, 'square', 0.08, 80);
+      tone(scene, 659, 60, 'square', 0.08, 160);
+      tone(scene, 880, 100, 'square', 0.10, 240);
+    }
+
+    function startBgMusic(scene) {
+      if (!scene || !scene.bgTracks || scene.bgIsPlaying || scene.holdBg) return;
+      const tr = scene.bgTracks[scene.currentBgIndex] || scene.bgTracks[0];
+      if (tr && !tr.isPlaying) tr.play();
+      scene.bgIsPlaying = true;
+    }
+
+    function stopBgMusic(scene) {
+      if (!scene || !scene.bgTracks) return;
+      scene.bgTracks.forEach(t => { try { t.stop(); } catch(e){} });
+      scene.bgIsPlaying = false;
+    }
+
+    function playLevelUp(scene) {
+      if (!scene || !scene.sound) return;
+      scene.holdBg = true;
+      stopBgMusic(scene);
+      const s = scene.sound.add('level_up', { volume: 1.0 });
+      s.once('complete', () => { try { s.destroy(); } catch(e){}; scene.holdBg = false; startBgMusic(scene); });
+      s.play();
+    }
+
+    function playVictory(scene) {
+      if (!scene || !scene.sound) return;
+      scene.holdBg = true;
+      stopBgMusic(scene);
+      const s = scene.sound.add('victory', { volume: 1.0 });
+      s.play();
+    }
+
+    // ===========================
+    // Placeholder Textures (Graphics -> Texture -> Sprites)
+    // ===========================
+
+    function makeGeneratedTextures(scene) {
+      // Node circle texture
+      {
+        const g = scene.make.graphics({ x: 0, y: 0, add: false });
+        const d = 36;
+        g.fillStyle(0x1f2937, 1);
+        g.fillCircle(d / 2, d / 2, d / 2);
+        g.lineStyle(3, 0x334155, 1);
+        g.strokeCircle(d / 2, d / 2, d / 2 - 2);
+        g.lineStyle(2, 0x67e8f9, 1);
+        g.strokeCircle(d / 2, d / 2, d / 2 - 6);
+        g.generateTexture('nodeTex', d, d);
+        g.destroy();
+      }
+
+      // Frog texture
+      {
+        const g = scene.make.graphics({ x: 0, y: 0, add: false });
+        const d = 40;
+        g.fillStyle(0x16a34a, 1);
+        g.fillCircle(d / 2, d / 2, d / 2);
+        g.lineStyle(3, 0x16e375, 1);
+        g.strokeCircle(d / 2, d / 2, d / 2 - 2);
+        g.fillStyle(0xffffff, 1);
+        g.fillCircle(d * 0.36, d * 0.42, 3.8);
+        g.fillCircle(d * 0.64, d * 0.42, 3.8);
+        g.fillStyle(0x111111, 1);
+        g.fillCircle(d * 0.36, d * 0.42, 1.8);
+        g.fillCircle(d * 0.64, d * 0.42, 1.8);
+        g.generateTexture('frogTex', d, d);
+        g.destroy();
+      }
+
+      // Player texture
+      {
+        const g = scene.make.graphics({ x: 0, y: 0, add: false });
+        const d = 40;
+        g.fillStyle(0x2563eb, 1);
+        g.fillCircle(d / 2, d / 2, d / 2);
+        g.lineStyle(3, 0x60a5fa, 1);
+        g.strokeCircle(d / 2, d / 2, d / 2 - 2);
+        g.fillStyle(0xf8fafc, 1);
+        const cx = d / 2, cy = d / 2;
+        const tri = new Phaser.Geom.Triangle(cx + 8, cy, cx - 2, cy - 5, cx - 2, cy + 5);
+        g.fillTriangleShape(tri);
+        g.generateTexture('playerTex', d, d);
+        g.destroy();
+      }
+    }
+
+    // ===========================
+    // Menu & Tutorial Scenes
+    // ===========================
+
+    function MenuScene() { Phaser.Scene.call(this, { key: 'MenuScene' }); }
+    MenuScene.prototype = Object.create(Phaser.Scene.prototype);
+    MenuScene.prototype.constructor = MenuScene;
+    MenuScene.prototype.create = function () {
+      const cx = this.cameras.main.centerX;
+      const cy = this.cameras.main.centerY;
+      const title = this.add.container(cx, cy - 120).setDepth(10);
+      const tBold = this.add.text(0, 0, 'Bắt ếch đồng ', { fontSize: '44px', color: '#f8fafc', fontStyle: 'bold', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif' })
+        .setOrigin(1, 0.5).setStroke('#0b1220', 8).setShadow(0, 4, '#000000', 8, true, true);
+      const tNormal = this.add.text(0, 0, 'dư', { fontSize: '44px', color: '#f8fafc', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif' })
+        .setOrigin(0, 0.5).setStroke('#0b1220', 8).setShadow(0, 4, '#000000', 8, true, true);
+      title.add([tBold, tNormal]);
+
+      const makeBtn = (y, label, onTap) => {
+        const w = 260, h = 64;
+        const r = this.add.rectangle(cx, y, w, h, 0x0ea5e9, 0.9).setStrokeStyle(3, 0x67e8f9).setInteractive({ useHandCursor: true });
+        const tt = this.add.text(cx, y, label, { fontSize: '26px', color: '#f8fafc', fontStyle: 'bold', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif' })
+          .setOrigin(0.5).setStroke('#0b1220', 6).setShadow(0, 3, '#000000', 6, true, true);
+        r.on('pointerdown', () => { ensureAudioUnlocked(this); onTap(); });
+        return { r, tt };
+      };
+      makeBtn(cy + 0, 'Chơi', () => this.scene.start('MainScene'));
+      makeBtn(cy + 90, 'Hướng dẫn', () => this.scene.start('TutorialScene'));
+    };
+
+    function TutorialScene() { Phaser.Scene.call(this, { key: 'TutorialScene' }); }
+    TutorialScene.prototype = Object.create(Phaser.Scene.prototype);
+    TutorialScene.prototype.constructor = TutorialScene;
+    TutorialScene.prototype.create = function () {
+      const cam = this.cameras.main; const cx = cam.centerX; const cy = cam.centerY;
+      const title = this.add.text(cx, 80, 'Hướng dẫn', { fontSize: '36px', color: '#f8fafc', fontStyle: 'bold', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif' })
+        .setOrigin(0.5).setStroke('#0b1220', 8).setShadow(0, 4, '#000000', 8, true, true);
+      const content = [
+        'Luật chơi: Bắt ếch khi người chơi và ếch đứng cùng một ô.',
+        'Di chuyển: dùng ◀ ▶ hoặc các nút trên màn hình, chạm trái/phải để nhảy.',
+        'Bắt: phím Space hoặc nút “Bắt”.',
+        'Ếch di chuyển: mỗi bước theo công thức (vị trí mới = a × vị trí cũ mod n).',
+        'Sau mỗi lần bắt, ếch respawn tại a^0, giá trị a sẽ đổi sang số nguyên tố cùng nhau với n.',
+        'Ếch dừng 0.5 giây sau khi đáp mới nhảy tiếp.',
+        'Thắng khi đạt 10 điểm. Mức độ tăng dần mỗi 5 điểm.'
+      ].join('\n');
+      const wrapW = cam.width * 0.82;
+      const t = this.add.text(cx, cy - 10, content, { fontSize: '22px', color: '#f1f5f9', align: 'left', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif', lineSpacing: 8, wordWrap: { width: wrapW } })
+        .setOrigin(0.5, 0).setDepth(2);
+      const panel = this.add.rectangle(cx, t.y + t.height / 2, wrapW + 40, t.height + 40, 0x0b1220, 0.82)
+        .setStrokeStyle(2, 0x94a3b8).setDepth(1);
+      const backR = this.add.rectangle(cx, cam.height - 80, 220, 56, 0x1f2937, 0.9).setStrokeStyle(2, 0x94a3b8).setInteractive({ useHandCursor: true });
+      this.add.text(cx, cam.height - 80, 'Quay lại', { fontSize: '24px', color: '#f8fafc', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif', fontStyle: 'bold' })
+        .setOrigin(0.5).setStroke('#0b1220', 6).setShadow(0, 3, '#000000', 6, true, true);
+      backR.on('pointerdown', () => { ensureAudioUnlocked(this); this.scene.start('MenuScene'); });
+    };
+
+    // ===========================
+    // Phaser Game Setup (Responsive + Centered)
+    // ===========================
+    const phaserConfig = {
+      type: Phaser.AUTO,
+      parent: 'phaser-parent',
+      backgroundColor: '#0b1220',
+      scale: {
+        mode: Phaser.Scale.FIT,
+        autoCenter: Phaser.Scale.CENTER_BOTH,
+        width: 1024,
+        height: 768
+      },
+      render: { pixelArt: true, antialias: false },
+      scene: [MenuScene, TutorialScene, MainScene]
+    };
+
+    // Create the Phaser game instance
+    window.addEventListener('load', () => {
+      new Phaser.Game(phaserConfig);
+    });
+  </script>
+</body>
+</html>
