@@ -45,7 +45,7 @@
     // Configuration & Constants
     // ===========================
     const CONFIG = {
-      N: 15,                 // modulus n (number of nodes)
+      N: 17,                 // modulus n (number of nodes)
       A: 2,                 // multiplier a
       RADIUS: 300,           // circle radius in pixels
       FROG_JUMP_INTERVAL_MS: 1500, // initial frog jump period (ms)
@@ -220,6 +220,9 @@
       this.frogIsMoving = false;
       this.playerIsMoving = false;
       this.lastCatchTime = 0;
+      this.movementLockUntil = 0;
+      this.stateLockUntil = 0;
+      this.deferredMovementLockMs = 0;
 
       // Keyboard input
       this.cursors = this.input.keyboard.createCursorKeys();
@@ -357,7 +360,7 @@
 
     function coprimesUnderN(n) {
       const arr = [];
-      for (let a = 2; a < n; a++) if (gcd(a, n) === 1) arr.push(a);
+      for (let a = 1; a < n; a++) if (gcd(a, n) === 1) arr.push(a);
       return arr;
     }
 
@@ -377,18 +380,46 @@
       const phi = eulerTotient(n);
       const phiDivs = divisorsFromFactors(primeFactorization(phi));
       const byA = {};
-      const orders = [];
+      const entries = [];
       for (const a of M) {
         const ord = multiplicativeOrder(a, n, phiDivs);
         byA[a] = ord;
-        orders.push(ord);
+        entries.push({ a, ord });
       }
-      const sorted = orders.slice().sort((x, y) => x - y);
-      const m = sorted.length;
-      const median = m === 0 ? 0 : (m % 2 === 1 ? sorted[(m - 1) >> 1] : (sorted[m / 2 - 1] + sorted[m / 2]) / 2);
-      const easy = M.filter(a => byA[a] <= median);
-      const hard = M.filter(a => byA[a] >= median);
-      return { M, orders, byA, median, easy, hard, phi, phiDivs };
+      // Stable split by order (and a as tiebreaker) to avoid any overlap glitches
+      entries.sort((u, v) => (u.ord - v.ord) || (u.a - v.a));
+      const m = entries.length;
+      let median = 0, easy = [], hard = [], atMedian = [];
+      if (m > 0) {
+        if (m % 2 === 1) {
+          const midIdx = (m - 1) >> 1;
+          median = entries[midIdx].ord;
+          easy = entries.filter(e => e.ord < median).map(e => e.a);
+          atMedian = entries.filter(e => e.ord === median).map(e => e.a);
+          hard = entries.filter(e => e.ord > median).map(e => e.a);
+        } else {
+          const i = m / 2 - 1, j = m / 2;
+          const lower = entries[i].ord;
+          const upper = entries[j].ord;
+          median = (lower + upper) / 2;
+          if (lower === upper) {
+            // integer median; ensure disjoint sets
+            easy = entries.filter(e => e.ord < lower).map(e => e.a);
+            atMedian = entries.filter(e => e.ord === lower).map(e => e.a);
+            hard = entries.filter(e => e.ord > lower).map(e => e.a);
+          } else {
+            // non-integer median; strict partition
+            easy = entries.filter(e => e.ord <= lower).map(e => e.a);
+            hard = entries.filter(e => e.ord >= upper).map(e => e.a);
+            atMedian = [];
+          }
+        }
+      }
+      const orders = entries.map(e => e.ord);
+      // Quick sanity: ensure disjoint
+      const es = new Set(easy); const hs = new Set(hard);
+      const overlap = [...es].filter(x => hs.has(x));
+      return { M, orders, byA, median, easy, hard, atMedian, phi, phiDivs, overlap };
     }
 
     function formatStopwatch(ms) {
@@ -523,6 +554,13 @@
       if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil && state !== 'miss' && state !== 'crouch') {
         return;
       }
+      // Prevent stray state changes (like delayed 'crouch' from a previous move)
+      // from interrupting an active swing/catch until the lock window passes
+      if ((scene.farmerState === 'swing' || scene.farmerState === 'catch') && state !== 'swing' && state !== 'catch') {
+        if (scene.time && scene.time.now < (scene.stateLockUntil || 0)) {
+          return;
+        }
+      }
       scene.farmerState = state;
       let key = 'farmer_crouch';
       if (state === 'jump') key = 'farmer_jump';
@@ -613,11 +651,24 @@
     // Step 3: Player Controls
     // ===========================
 
+    function isMovementLocked(scene) {
+      if (!scene) return false;
+      if (scene.playerIsMoving) return true;
+      if (scene.farmerState === 'swing' || scene.farmerState === 'catch') return true;
+      if (scene.captureEnabled === false) return true;
+      if (scene.time) {
+        const now = scene.time.now || 0;
+        if (scene.missPoseUntil && now < scene.missPoseUntil) return true;
+        if (scene.movementLockUntil && now < scene.movementLockUntil) return true;
+      }
+      return false;
+    }
+
     function handleInput(scene) {
       scene.input.keyboard.on('keydown-LEFT', () => {
         ensureAudioUnlocked(scene);
         if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
-        if (scene.farmerState === 'swing' || scene.farmerState === 'catch') return;
+        if (isMovementLocked(scene)) return;
         if (scene.playerIsMoving) return;
         const next = (scene.playerIndex - 1 + scene.N) % scene.N; // counterclockwise
         movePlayerTo(scene, next);
@@ -626,7 +677,7 @@
       scene.input.keyboard.on('keydown-RIGHT', () => {
         ensureAudioUnlocked(scene);
         if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
-        if (scene.farmerState === 'swing' || scene.farmerState === 'catch') return;
+        if (isMovementLocked(scene)) return;
         if (scene.playerIsMoving) return;
         const next = (scene.playerIndex + 1) % scene.N; // clockwise
         movePlayerTo(scene, next);
@@ -634,6 +685,10 @@
 
       scene.input.keyboard.on('keydown-SPACE', () => {
         ensureAudioUnlocked(scene);
+        if (scene.playerIsMoving && scene.time) {
+          scene.deferredMovementLockMs = Math.max(scene.deferredMovementLockMs || 0, 220);
+        }
+        if (scene.time) scene.movementLockUntil = Math.max(scene.movementLockUntil || 0, scene.time.now + 120);
         attemptCapture(scene);
       });
 
@@ -656,12 +711,12 @@
       };
       const left = makeBtn(cx - 150, cy - 300, 110, 52, '◀', 0x1f2937, 0x60a5fa, () => {
         if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
-        if (scene.farmerState === 'swing' || scene.farmerState === 'catch') return;
+        if (isMovementLocked(scene)) return;
         if (scene.playerIsMoving) return;
         const next = (scene.playerIndex - 1 + scene.N) % scene.N;
         movePlayerTo(scene, next);
       });
-      const catchBtn = makeBtn(cx, cy -300, 140, 56, 'Bắt', 0x0ea5e9, 0x67e8f9, () => attemptCapture(scene));
+      const catchBtn = makeBtn(cx, cy -300, 140, 56, 'Bắt', 0x0ea5e9, 0x67e8f9, () => { if (scene.playerIsMoving && scene.time) { scene.deferredMovementLockMs = Math.max(scene.deferredMovementLockMs || 0, 220); } if (scene.time) scene.movementLockUntil = Math.max(scene.movementLockUntil || 0, scene.time.now + 120); attemptCapture(scene); });
       // Stopwatch text under the Catch button
       const watchY = catchBtn.r.y + ((catchBtn.r.height || 56) / 2) + 22;
       scene.stopwatchText = scene.add.text(catchBtn.r.x, watchY, '00:00.0', {
@@ -677,7 +732,7 @@
         .setShadow(0, 3, '#000000', 6, true, true);
       const right = makeBtn(cx + 150, cy - 300, 110, 52, '▶', 0x1f2937, 0x60a5fa, () => {
         if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
-        if (scene.farmerState === 'swing' || scene.farmerState === 'catch') return;
+        if (isMovementLocked(scene)) return;
         if (scene.playerIsMoving) return;
         const next = (scene.playerIndex + 1) % scene.N;
         movePlayerTo(scene, next);
@@ -693,7 +748,7 @@
           if (over(scene.uiButtons.left) || over(scene.uiButtons.catchBtn) || over(scene.uiButtons.right)) return;
         }
         if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
-        if (scene.farmerState === 'swing' || scene.farmerState === 'catch') return;
+        if (isMovementLocked(scene)) return;
         if (scene.playerIsMoving) return;
         if (px < w * 0.3) {
           const next = (scene.playerIndex - 1 + scene.N) % scene.N;
@@ -706,7 +761,9 @@
     }
 
     function movePlayerTo(scene, targetIndex) {
+      if (isMovementLocked && typeof isMovementLocked === 'function') { if (isMovementLocked(scene)) return; }
       if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) return;
+      if (scene.captureEnabled === false) return;
       if (scene.farmerState === 'swing' || scene.farmerState === 'catch') return;
       const from = scene.nodes[scene.playerIndex].pos;
       const to = scene.nodes[targetIndex].pos;
@@ -725,6 +782,10 @@
         .then(() => {
           scene.playerIndex = targetIndex;
           scene.playerIsMoving = false;
+          if (scene.deferredMovementLockMs && scene.time) {
+            scene.movementLockUntil = Math.max(scene.movementLockUntil || 0, scene.time.now + scene.deferredMovementLockMs);
+            scene.deferredMovementLockMs = 0;
+          }
           setFarmerState(scene, 'landing');
           sfxLandPlayer(scene);
           scene.time.delayedCall(140, () => setFarmerState(scene, 'crouch'));
@@ -760,6 +821,8 @@
         // Don't swing; just a quick miss pose + audio
         scene.captureEnabled = false;
         setFarmerState(scene, 'swing');
+        if (scene.time) scene.stateLockUntil = Math.max(scene.stateLockUntil || 0, scene.time.now + CONFIG.SWING_HOLD_MS + 10);
+        if (scene.time) scene.movementLockUntil = Math.max(scene.movementLockUntil || 0, scene.time.now + CONFIG.SWING_HOLD_MS + 40);
         sfxSwing(scene);
         scene.time.delayedCall(CONFIG.SWING_HOLD_MS, () => {
           setFarmerState(scene, 'miss');
@@ -779,6 +842,8 @@
       setFarmerState(scene, 'swing');
       sfxSwing(scene);
       scene.captureEnabled = false;
+      if (scene.time) scene.stateLockUntil = Math.max(scene.stateLockUntil || 0, scene.time.now + CONFIG.SWING_HOLD_MS + CONFIG.CATCH_HOLD_MS + 10);
+      if (scene.time) scene.movementLockUntil = Math.max(scene.movementLockUntil || 0, scene.time.now + CONFIG.SWING_HOLD_MS + CONFIG.CATCH_HOLD_MS + 60);
       scene.time.delayedCall(CONFIG.SWING_HOLD_MS, () => {
         // Success path
         const now = scene.time.now;
