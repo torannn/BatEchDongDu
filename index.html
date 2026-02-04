@@ -115,6 +115,7 @@
       this.center = new Phaser.Math.Vector2(centerX, centerY);
       this.N = CONFIG.N;
       this.A = CONFIG.A;
+      this.difficultyInfo = computeDifficultyForN(this.N);
       this.frogTweenMs = CONFIG.FROG_TWEEN_MS;
       this.playerSlowerDelta = CONFIG.PLAYER_SLOWER_DELTA_MS;
       this.playerTweenMs = this.frogTweenMs + this.playerSlowerDelta;
@@ -123,6 +124,7 @@
       this.frogExp = 0;
       this.earliestNextFrogMoveTime = 0;
       this.didWin = false;
+      this.stopwatchStart = this.time.now;
       this.bgTracks = [
         this.sound.add('bgmusic', { loop: true, volume: 0.4 }),
         this.sound.add('bgmusic2', { loop: true, volume: 0.4 })
@@ -234,6 +236,10 @@
 
     MainScene.prototype.update = function () {
       // Logic is event/tween driven
+      if (this.stopwatchText && this.time) {
+        const elapsed = Math.max(0, this.time.now - (this.stopwatchStart || this.time.now));
+        this.stopwatchText.setText(formatStopwatch(elapsed));
+      }
     };
 
     // ===========================
@@ -298,6 +304,101 @@
         e >>= 1;
       }
       return result;
+    }
+
+    // ===========================
+    // Difficulty helpers (orders and median)
+    // ===========================
+    function primeFactorization(n) {
+      const fac = {};
+      let m = Math.floor(Math.abs(n));
+      for (let p = 2; p * p <= m; p++) {
+        while (m % p === 0) {
+          fac[p] = (fac[p] || 0) + 1;
+          m = Math.floor(m / p);
+        }
+      }
+      if (m > 1) fac[m] = (fac[m] || 0) + 1;
+      return fac;
+    }
+
+    function eulerTotient(n) {
+      if (n <= 0) return 0;
+      let result = n;
+      let m = n;
+      for (let p = 2; p * p <= m; p++) {
+        if (m % p === 0) {
+          while (m % p === 0) m = Math.floor(m / p);
+          result = Math.floor(result - result / p);
+        }
+      }
+      if (m > 1) result = Math.floor(result - result / m);
+      return result;
+    }
+
+    function divisorsFromFactors(fac) {
+      let divs = [1];
+      for (const k in fac) {
+        const p = parseInt(k, 10);
+        const e = fac[k];
+        const powers = [];
+        let v = 1;
+        for (let i = 1; i <= e; i++) { v *= p; powers.push(v); }
+        const next = [];
+        for (const d of divs) {
+          next.push(d);
+          for (const pow of powers) next.push(d * pow);
+        }
+        divs = next;
+      }
+      divs.sort((a, b) => a - b);
+      return divs;
+    }
+
+    function coprimesUnderN(n) {
+      const arr = [];
+      for (let a = 2; a < n; a++) if (gcd(a, n) === 1) arr.push(a);
+      return arr;
+    }
+
+    function multiplicativeOrder(a, n, phiDivs) {
+      // requires gcd(a,n)=1; finds smallest d in divisors(phi(n)) with a^d ≡ 1 (mod n)
+      for (let i = 0; i < phiDivs.length; i++) {
+        const d = phiDivs[i];
+        if (d <= 0) continue;
+        if (powModIter(a, d, n) === 1 % n) return d;
+      }
+      // Fallback: in worst case, return last divisor (phi(n))
+      return phiDivs[phiDivs.length - 1] || 1;
+    }
+
+    function computeDifficultyForN(n) {
+      const M = coprimesUnderN(n);
+      const phi = eulerTotient(n);
+      const phiDivs = divisorsFromFactors(primeFactorization(phi));
+      const byA = {};
+      const orders = [];
+      for (const a of M) {
+        const ord = multiplicativeOrder(a, n, phiDivs);
+        byA[a] = ord;
+        orders.push(ord);
+      }
+      const sorted = orders.slice().sort((x, y) => x - y);
+      const m = sorted.length;
+      const median = m === 0 ? 0 : (m % 2 === 1 ? sorted[(m - 1) >> 1] : (sorted[m / 2 - 1] + sorted[m / 2]) / 2);
+      const easy = M.filter(a => byA[a] <= median);
+      const hard = M.filter(a => byA[a] >= median);
+      return { M, orders, byA, median, easy, hard, phi, phiDivs };
+    }
+
+    function formatStopwatch(ms) {
+      const total = Math.max(0, Math.floor(ms));
+      const minutes = Math.floor(total / 60000);
+      const seconds = Math.floor((total % 60000) / 1000);
+      const tenth = Math.floor((total % 1000) / 100);
+      const mm = String(minutes).padStart(2, '0');
+      const ss = String(seconds).padStart(2, '0');
+      return `${mm}:${ss}.${tenth}`;
     }
 
     function nextCoprimeBase(scene) {
@@ -516,6 +617,7 @@
       scene.input.keyboard.on('keydown-LEFT', () => {
         ensureAudioUnlocked(scene);
         if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
+        if (scene.farmerState === 'swing' || scene.farmerState === 'catch') return;
         if (scene.playerIsMoving) return;
         const next = (scene.playerIndex - 1 + scene.N) % scene.N; // counterclockwise
         movePlayerTo(scene, next);
@@ -524,6 +626,7 @@
       scene.input.keyboard.on('keydown-RIGHT', () => {
         ensureAudioUnlocked(scene);
         if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
+        if (scene.farmerState === 'swing' || scene.farmerState === 'catch') return;
         if (scene.playerIsMoving) return;
         const next = (scene.playerIndex + 1) % scene.N; // clockwise
         movePlayerTo(scene, next);
@@ -553,13 +656,28 @@
       };
       const left = makeBtn(cx - 150, cy - 300, 110, 52, '◀', 0x1f2937, 0x60a5fa, () => {
         if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
+        if (scene.farmerState === 'swing' || scene.farmerState === 'catch') return;
         if (scene.playerIsMoving) return;
         const next = (scene.playerIndex - 1 + scene.N) % scene.N;
         movePlayerTo(scene, next);
       });
       const catchBtn = makeBtn(cx, cy -300, 140, 56, 'Bắt', 0x0ea5e9, 0x67e8f9, () => attemptCapture(scene));
+      // Stopwatch text under the Catch button
+      const watchY = catchBtn.r.y + ((catchBtn.r.height || 56) / 2) + 22;
+      scene.stopwatchText = scene.add.text(catchBtn.r.x, watchY, '00:00.0', {
+        fontSize: '20px',
+        color: '#f8fafc',
+        fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif',
+        fontStyle: 'bold'
+      })
+        .setOrigin(0.5)
+        .setDepth(uiDepth + 1)
+        .setScrollFactor(0)
+        .setStroke('#0b1220', 5)
+        .setShadow(0, 3, '#000000', 6, true, true);
       const right = makeBtn(cx + 150, cy - 300, 110, 52, '▶', 0x1f2937, 0x60a5fa, () => {
         if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
+        if (scene.farmerState === 'swing' || scene.farmerState === 'catch') return;
         if (scene.playerIsMoving) return;
         const next = (scene.playerIndex + 1) % scene.N;
         movePlayerTo(scene, next);
@@ -575,6 +693,7 @@
           if (over(scene.uiButtons.left) || over(scene.uiButtons.catchBtn) || over(scene.uiButtons.right)) return;
         }
         if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) { sfxCooldown(scene); return; }
+        if (scene.farmerState === 'swing' || scene.farmerState === 'catch') return;
         if (scene.playerIsMoving) return;
         if (px < w * 0.3) {
           const next = (scene.playerIndex - 1 + scene.N) % scene.N;
@@ -588,6 +707,7 @@
 
     function movePlayerTo(scene, targetIndex) {
       if (scene.missPoseUntil && scene.time && scene.time.now < scene.missPoseUntil) return;
+      if (scene.farmerState === 'swing' || scene.farmerState === 'catch') return;
       const from = scene.nodes[scene.playerIndex].pos;
       const to = scene.nodes[targetIndex].pos;
       scene.playerIsMoving = true;
@@ -965,10 +1085,10 @@
       const cx = this.cameras.main.centerX;
       const cy = this.cameras.main.centerY;
       const title = this.add.container(cx, cy - 120).setDepth(10);
-      const tBold = this.add.text(0, 0, 'Bắt ếch đồng ', { fontSize: '44px', color: '#f8fafc', fontStyle: 'bold', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif' })
-        .setOrigin(1, 0.5).setStroke('#0b1220', 8).setShadow(0, 4, '#000000', 8, true, true);
+      const tBold = this.add.text(0, 0, 'Bắt ếch đồng ', { fontSize: '44px', color: '#a7ffad', fontStyle: 'bold', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif' })
+        .setOrigin(0.5, 0.5).setStroke('#0b1220', 8).setShadow(0, 4, '#000000', 8, true, true);
       const tNormal = this.add.text(0, 0, 'dư', { fontSize: '44px', color: '#f8fafc', fontFamily: 'Be Vietnam Pro, system-ui, -apple-system, Segoe UI, Roboto, sans-serif' })
-        .setOrigin(0, 0.5).setStroke('#0b1220', 8).setShadow(0, 4, '#000000', 8, true, true);
+        .setOrigin(-1, -0.3).setStroke('#0b1220', 8).setShadow(0, 4, '#000000', 8, true, true);
       title.add([tBold, tNormal]);
 
       const makeBtn = (y, label, onTap) => {
